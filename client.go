@@ -4,245 +4,279 @@ import (
 	"bytes"
 	"crypto/rsa"
 	"errors"
+	"math/big"
+	"net"
+	"sync"
 	"time"
 )
 
-// Return client hashname.
-func (client *Client) Hashname() string {
-	return client.hashname
-}
-
-// Return client's public key.
-func (client *Client) Public() *rsa.PublicKey {
-	x := *client.keys.public
-	return &x
-}
-
-// Return client's private key.
-func (client *Client) Private() *rsa.PrivateKey {
-	x := *client.keys.private
-	return &x
-}
-
-// Return listener address.
-func (client *Client) Address() string {
-	return client.address
-}
-
-// Return listener certificate.
-func (client *Client) Certificate() []byte {
-	return client.listener.certificate
-}
-
-// Return Destination struct from connected client.
-func (client *Client) Destination(hash string) *Destination {
-	if !client.InConnections(hash) {
+func NewClient(priv *rsa.PrivateKey, handle func(*Client, *Package)) *Client {
+	if priv == nil {
 		return nil
 	}
-	return &Destination{
-		Address:     client.Connections[hash].address,
-		Certificate: client.Connections[hash].certificate,
-		Public:      client.Connections[hash].throwClient,
-		Receiver:    client.Connections[hash].public,
+	return &Client{
+		handle:      handle,
+		mutex:       new(sync.Mutex),
+		privateKey:  priv,
+		mapping:     make(map[string]bool),
+		connections: make(map[net.Conn]string),
+		actions:     make(map[string]chan string),
+		f2f: friendToFriend{
+			friends: make(map[string]*rsa.PublicKey),
+		},
 	}
 }
 
-// Check if user saved in client data.
-func (client *Client) InConnections(hash string) bool {
-	if _, ok := client.Connections[hash]; ok {
+func (client *Client) Send(receiver *rsa.PublicKey, pack *Package, route []*rsa.PublicKey, pseudoSender *Client) (string, error) {
+	var (
+		err      error
+		result   string
+		hash     = HashPublic(receiver)
+		retryNum = settings.RETRY_NUM
+	)
+
+	client.actions[hash] = make(chan string)
+	defer delete(client.actions, hash)
+
+tryAgain:
+
+	routePack := client.Encrypt(receiver, pack)
+
+	if pseudoSender == nil {
+		pseudoSender = client
+	}
+
+	for _, pub := range route {
+		routePack = pseudoSender.Encrypt(pub, 
+			NewPackage(settings.ROUTE_MSG, SerializePackage(routePack)))
+	}
+
+	client.send(routePack)
+
+	select {
+	case result = <-client.actions[hash]:
+	case <-time.After(time.Duration(settings.WAIT_TIME) * time.Second):
+		if retryNum > 1 {
+			retryNum -= 1
+			goto tryAgain
+		}
+		err = errors.New("time is over")
+	}
+
+	return result, err
+}
+
+func (client *Client) Connect(address string) error {
+	if uint(len(client.connections)) > settings.CONN_SIZE {
+		return errors.New("max conn")
+	}
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return err
+	}
+	client.connections[conn] = address
+	go handleConn(conn, client, client.handle)
+	return nil
+}
+
+func (client *Client) Disconnect(address string) {
+	for conn, addr := range client.connections {
+		if addr == address {
+			delete(client.connections, conn)
+			conn.Close()
+		}
+	}
+}
+
+func (client *Client) Public() *rsa.PublicKey {
+	return &client.privateKey.PublicKey
+}
+
+func (client *Client) Private() *rsa.PrivateKey {
+	return client.privateKey
+}
+
+func (client *Client) StringPublic() string {
+	return StringPublic(&client.privateKey.PublicKey)
+}
+
+func (client *Client) StringPrivate() string {
+	return StringPrivate(client.privateKey)
+}
+
+func (client *Client) HashPublic() string {
+	return HashPublic(&client.privateKey.PublicKey)
+}
+
+func (client *Client) F2F() bool {
+	return client.f2f.enabled
+}
+
+func (client *Client) EnableF2F() {
+	client.f2f.enabled = true
+}
+
+func (client *Client) DisableF2F() {
+	client.f2f.enabled = false
+}
+
+func (client *Client) InF2F(pub *rsa.PublicKey) bool {
+	if _, ok := client.f2f.friends[HashPublic(pub)]; ok {
 		return true
 	}
 	return false
 }
 
-// Switcher function about GET and SET options.
-// GET: accept package and send response;
-// SET: accept package;
-func (client *Client) HandleAction(title string, pack *Package, handleGet func(*Client, *Package) string, handleSet func(*Client, *Package)) bool {
-	if pack.Head.Title != title {
-		return false
+func (client *Client) ListF2F() []rsa.PublicKey {
+	var list []rsa.PublicKey
+	for _, pub := range client.f2f.friends {
+		list = append(list, *pub)
 	}
-	switch pack.Head.Option {
-	case settings.OPTION_GET:
-		data := handleGet(client, pack)
-		hash := pack.From.Sender.Hashname
-		client.SendTo(client.Destination(hash), &Package{
-			Head: Head{
-				Title:  title,
-				Option: settings.OPTION_SET,
-			},
-			Body: Body{
-				Data: data,
-			},
-		})
-	case settings.OPTION_SET:
-		handleSet(client, pack)
-	default:
-		return false
-	}
-	return true
+	return list
 }
 
-// Disconnect from user.
-// Send package for disconnect.
-// If the user is not responding: delete in local data.
-func (client *Client) Disconnect(dest *Destination) error {
-	var err error
-	dest = client.wrapDest(dest)
-
-	hash := HashPublic(dest.Receiver)
-	if !client.InConnections(hash) {
-		return errors.New("client not connected")
-	}
-
-	if client.Connections[hash].relation == nil {
-		_, err = client.SendTo(dest, &Package{
-			Head: Head{
-				Title:  settings.TITLE_DISCONNECT,
-				Option: settings.OPTION_GET,
-			},
-		})
-	}
-
-	if client.Connections[hash].relation != nil {
-		client.Connections[hash].relation.Close()
-	}
-
-	delete(client.Connections, hash)
-	return err
+func (client *Client) AppendF2F(pub *rsa.PublicKey) {
+	client.f2f.friends[HashPublic(pub)] = pub
 }
 
-// Connect to user.
-// Create local data with parameters.
-// After sending GET and receiving SET package, set Connected = true.
-func (client *Client) Connect(dest *Destination) error {
-	dest = client.wrapDest(dest)
+func (client *Client) RemoveF2F(pub *rsa.PublicKey) {
+	delete(client.f2f.friends, HashPublic(pub))
+}
+
+func (client *Client) Encrypt(receiver *rsa.PublicKey, pack *Package) *Package {
 	var (
-		session = GenerateRandomBytes(32)
-		hash    = HashPublic(dest.Receiver)
+		session = GenerateBytes(uint(settings.SKEY_SIZE))
+		rand    = GenerateBytes(uint(settings.RAND_SIZE))
+		hash    = HashSum(bytes.Join(
+			[][]byte{
+				rand,
+				Base64Decode(client.StringPublic()),
+				Base64Decode(StringPublic(receiver)),
+				[]byte(pack.Head.Title),
+				[]byte(pack.Body.Data),
+			},
+			[]byte{},
+		))
+		sign = Sign(client.privateKey, hash)
 	)
-	if dest.Public == nil {
-		return client.hiddenConnect(hash, session, dest.Receiver)
-	}
-	client.Connections[hash] = &Connect{
-		connected:   false,
-		hashname:    hash,
-		address:     dest.Address,
-		throwClient: dest.Public,
-		public:      dest.Receiver,
-		certificate: dest.Certificate,
-		session:     session,
-		Chans: Chans{
-			Action: make(chan bool),
-			action: make(chan bool),
+	return &Package{
+		Head: HeadPackage{
+			Rand:    Base64Encode(EncryptAES(session, rand)),
+			Title:   Base64Encode(EncryptAES(session, []byte(pack.Head.Title))),
+			Sender:  Base64Encode(EncryptAES(session, Base64Decode(client.StringPublic()))),
+			Session: Base64Encode(EncryptRSA(receiver, session)),
+		},
+		Body: BodyPackage{
+			Data: Base64Encode(EncryptAES(session, []byte(pack.Body.Data))),
+			Hash: Base64Encode(hash),
+			Sign: Base64Encode(EncryptAES(session, sign)),
+			Npow: ProofOfWork(hash, settings.POWS_DIFF),
 		},
 	}
-	_, err := client.SendTo(dest, &Package{
-		Head: Head{
-			Title:  settings.TITLE_CONNECT,
-			Option: settings.OPTION_GET,
+}
+
+func (client *Client) Decrypt(pack *Package) *Package {
+	session := DecryptRSA(client.privateKey, Base64Decode(pack.Head.Session))
+	if session == nil {
+		return nil
+	}
+	publicBytes := DecryptAES(session, Base64Decode(pack.Head.Sender))
+	if publicBytes == nil {
+		return nil
+	}
+	public := ParsePublic(Base64Encode(publicBytes))
+	if public == nil {
+		return nil
+	}
+	size := big.NewInt(1)
+	size.Lsh(size, uint(settings.AKEY_SIZE-1))
+	if public.N.Cmp(size) == -1 {
+		return nil
+	}
+	titleBytes := DecryptAES(session, Base64Decode(pack.Head.Title))
+	if titleBytes == nil {
+		return nil
+	}
+	dataBytes := DecryptAES(session, Base64Decode(pack.Body.Data))
+	if dataBytes == nil {
+		return nil
+	}
+	rand := DecryptAES(session, Base64Decode(pack.Head.Rand))
+	hash := HashSum(bytes.Join(
+		[][]byte{
+			rand,
+			publicBytes,
+			Base64Decode(client.StringPublic()),
+			titleBytes,
+			dataBytes,
 		},
-		Body: Body{
-			Data: string(PackJSON(conndata{
-				Certificate: Base64Encode(client.listener.certificate),
-				Public:  Base64Encode([]byte(StringPublic(client.keys.public))),
-				Session: Base64Encode(EncryptRSA(dest.Receiver, session)),
-			})),
-		},
-	})
+		[]byte{},
+	))
+	if Base64Encode(hash) != pack.Body.Hash {
+		return nil
+	}
+	sign := DecryptAES(session, Base64Decode(pack.Body.Sign))
+	if sign == nil {
+		return nil
+	}
+	err := Verify(public, hash, sign)
 	if err != nil {
-		return err
+		return nil
 	}
-	select {
-	case <-client.Connections[hash].Chans.action:
-		client.Connections[hash].connected = true
-	case <-time.After(time.Duration(settings.WAITING_TIME) * time.Second):
-		if client.Connections[hash].relation != nil {
-			client.Connections[hash].relation.Close()
-		}
-		delete(client.Connections, hash)
-		return errors.New("client not connected")
+	if !ProofIsValid(hash, settings.POWS_DIFF, pack.Body.Npow) {
+		return nil
 	}
-	return nil
+	return &Package{
+		Head: HeadPackage{
+			Rand:    Base64Encode(rand),
+			Title:   string(titleBytes),
+			Sender:  Base64Encode(publicBytes),
+			Session: Base64Encode(session),
+		},
+		Body: BodyPackage{
+			Data: string(dataBytes),
+			Hash: pack.Body.Hash,
+			Sign: Base64Encode(sign),
+			Npow: pack.Body.Npow,
+		},
+	}
 }
 
-// Load file from node.
-// Input = name file in node side.
-// Output = result name file in our side.
-func (client *Client) LoadFile(dest *Destination, input string, output string) error {
-	dest = client.wrapDest(dest)
-
-	hash := HashPublic(dest.Receiver)
-	if !client.InConnections(hash) {
-		return errors.New("client not connected")
-	}
-
-	if fileIsExist(output) {
-		return errors.New("file already exists")
-	}
-
-	client.Connections[hash].transfer.active = true
-	defer func() {
-		client.Connections[hash].transfer.active = false
-	}()
-
-	for i := uint64(0) ;; i++ {
-		client.SendTo(dest, &Package{
-			Head: Head{
-				Title:  settings.TITLE_FILETRANSFER,
-				Option: settings.OPTION_GET,
+func (client *Client) send(pack *Package) {
+	bytesPack := SerializePackage(pack)
+	client.mapping[pack.Body.Hash] = true
+	for cn := range client.connections {
+		go cn.Write(bytes.Join(
+			[][]byte{
+				[]byte(bytesPack),
+				[]byte(settings.END_BYTES),
 			},
-			Body: Body{
-				Data: string(PackJSON(FileTransfer{
-					Head: HeadTransfer{
-						Id:   i,
-						Name: input,
-					},
-				})),
-			},
-		})
-
-		select {
-		case <-client.Connections[hash].Chans.action:
-			// pass
-		case <-time.After(time.Duration(settings.WAITING_TIME * 2) * time.Second):
-			return errors.New("waiting time is over")
-		}
-
-		var read = new(FileTransfer)
-		UnpackJSON([]byte(client.Connections[hash].transfer.packdata), read)
-
-		if read == nil {
-			return errors.New("pack is null")
-		}
-
-		if read.Head.IsNull {
-			break
-		}
-
-		data := read.Body.Data
-		if !bytes.Equal(read.Body.Hash, HashSum(data)) {
-			return errors.New("hash not equal file hash")
-		}
-
-		writeFile(output, read.Body.Data)
+			[]byte{},
+		))
 	}
-
-	return nil
 }
 
-// Send by Destination.
-func (client *Client) SendTo(dest *Destination, pack *Package) (*Package, error) {
-	dest = client.wrapDest(dest)
-	switch {
-	case dest == nil: return nil, errors.New("dest is null")
-	case dest.Public == nil: return nil, errors.New("public is null")
-	case dest.Receiver == nil: return nil, errors.New("receiver is null")
+func (client *Client) redirect(pack *Package, sender net.Conn) {
+	encPack := SerializePackage(pack)
+	for cn := range client.connections {
+		if cn == sender {
+			continue
+		}
+		go cn.Write(bytes.Join(
+			[][]byte{
+				[]byte(encPack),
+				[]byte(settings.END_BYTES),
+			},
+			[]byte{},
+		))
 	}
+}
 
-	pack.To.Receiver.Hashname = HashPublic(dest.Receiver)
-	pack.To.Hashname = HashPublic(dest.Public)
-	pack.To.Address = dest.Address
-
-	return client.send(_confirm, pack)
+func (client *Client) response(pub *rsa.PublicKey, data string) {
+	client.mutex.Lock()
+	hash := HashPublic(pub)
+	if _, ok := client.actions[hash]; ok {
+		client.actions[hash] <- data
+	}
+	client.mutex.Unlock()
 }

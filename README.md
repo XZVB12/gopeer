@@ -1,64 +1,38 @@
 # gopeer
-> Framework for create decentralized networks. Version: 1.1.4s.
+> Framework for create decentralized networks. Version: 1.2.3s.
 
 ### Framework based applications:
 * HiddenLake: [github.com/number571/HiddenLake](https://github.com/number571/HiddenLake "F2F network");
 
 ### Specifications:
-1. Data transfer:
 * Protocol: TCP;
-* Direct/Hidden connection;
-* File transfer supported;
-* End to end encryption;
-2. Encryption:
-* Protocol: TLS / Package;
-* Symmetric algorithm: AES-[CBC,OFB];
-* Asymmetric algorithm: RSA-OAEP;
-* Hash function: HMAC(SHA256);
+* Encryption: E2E;
+* Symmetric algorithm: AES-CBC;
+* Asymmetric algorithm: RSA-OAEP, RSA-PSS;
+* Hash function: SHA256;
 
 ### Template:
 ```go
 package main
 
 import (
-    "github.com/number571/gopeer"
-)
-
-const (
-    ADDRESS = "ipv4:port"
-    TITLE   = "TITLE"
+    gp "./gopeer"
 )
 
 func init() {
-    gopeer.Set(gopeer.SettingsType{
-        "NETWORK": "GOPEER-NETWORK",
-        "VERSION": "template 1.0.0",
-        "KEY_SIZE": uint64(1 << 10),
+    gp.Set(gp.SettingsType{
+        "AKEY_SIZE": uint(3 << 10),
+        "SKEY_SIZE": uint(1 << 5),
     })
 }
 
 func main() {
-    key, cert := gopeer.GenerateCertificate(
-        gopeer.Get("NETWORK").(string), 
-        gopeer.Get("KEY_SIZE").(uint16),
-    )
-    listener := gopeer.NewListener(ADDRESS)
-    listener.Open(&gopeer.Certificate{
-        Cert: []byte(cert),
-        Key:  []byte(key),
-    }).Run(handleServer)
-    defer listener.Close()
+    node := gp.NewClient(gp.GeneratePrivate(gp.Get("AKEY_SIZE").(uint)), handleFunc)
+    gp.NewNode(":8080", node).Run()
     // ...
 }
 
-func handleServer(client *gopeer.Client, pack *gopeer.Package) {
-    client.HandleAction(TITLE, pack,
-        func(client *gopeer.Client, pack *gopeer.Package) (set string) {
-            return set
-        },
-        func(client *gopeer.Client, pack *gopeer.Package) {
-        },
-    )
+func handleFunc(client *gp.Client, pack *gp.Package) {
     // ...
 }
 ```
@@ -67,52 +41,36 @@ func handleServer(client *gopeer.Client, pack *gopeer.Package) {
 ```go
 type SettingsType map[string]interface{}
 type settingsStruct struct {
-    TITLE_CONNECT      string
-    TITLE_DISCONNECT   string
-    TITLE_FILETRANSFER string
-    OPTION_GET         string
-    OPTION_SET         string
-    IS_CLIENT          string
-    END_BYTES          string
-    TEMPLATE           string
-    HMAC_KEY           string
-    NETWORK            string
-    VERSION            string
-    max_id             uint64
-    KEY_SIZE           uint16
-    BITS_SIZE          uint64
-    PACK_SIZE          uint64
-    BUFF_SIZE          uint32
-    REMEMBER           uint16
-    DIFFICULTY         uint8
-    WAITING_TIME       uint8
-    REDIRECT_QUAN      uint8
+    END_BYTES string
+    ROUTE_MSG string
+    RETRY_NUM uint
+    WAIT_TIME uint
+    POWS_DIFF uint
+    CONN_SIZE uint
+    BUFF_SIZE uint
+    PACK_SIZE uint
+    MAPP_SIZE uint
+    AKEY_SIZE uint
+    SKEY_SIZE uint
+    RAND_SIZE uint
 }
 ```
 
 ### Default settings:
 ```go
 {
-    TITLE_CONNECT:      "[TITLE-CONNECT]",
-    TITLE_DISCONNECT:   "[TITLE-DISCONNECT]",
-    TITLE_FILETRANSFER: "[TITLE-FILETRANSFER]",
-    OPTION_GET:         "[OPTION-GET]", // Send
-    OPTION_SET:         "[OPTION-SET]", // Receive
-    IS_CLIENT:          "[IS-CLIENT]",
-    END_BYTES:          "\000\000\000\005\007\001\000\000\000",
-    TEMPLATE:           "0.0.0.0",
-    HMAC_KEY:           "PASSWORD",
-    NETWORK:            "GOPEER-FRAMEWORK",
-    VERSION:            "Version 1.0.0",
-    max_id:             (1 << 48) / (8 << 20), // BITS_SIZE / PACK_SIZE
-    KEY_SIZE:           2 << 10, // 2048 bit
-    BITS_SIZE:          1 << 48, // 2^48 bits
-    PACK_SIZE:          8 << 20, // 8MiB
-    BUFF_SIZE:          1 << 20, // 1MiB
-    REMEMBER:           256, // hash packages
-    DIFFICULTY:         15,
-    WAITING_TIME:       5, // seconds
-    REDIRECT_QUAN:      3,
+    END_BYTES: "\000\005\007\001\001\007\005\000",
+    ROUTE_MSG: "\000\001\002\003\004\005\006\007",
+    RETRY_NUM: 3,       // quantity
+    WAIT_TIME: 20,      // seconds
+    POWS_DIFF: 20,      // bits
+    CONN_SIZE: 10,      // quantity
+    BUFF_SIZE: 2 << 20, // 2*(2^20)B = 2MiB
+    PACK_SIZE: 4 << 20, // 4*(2^20)B = 4MiB
+    MAPP_SIZE: 2 << 10, // 2*(2^10)H = 88KiB
+    AKEY_SIZE: 2 << 10, // 2*(2^10)b = 256B
+    SKEY_SIZE: 1 << 4,  // 2^4B = 16B
+    RAND_SIZE: 1 << 4,  // 2^4B = 16B
 }
 ```
 
@@ -124,116 +82,85 @@ func Get(key string) interface{} {}
 
 ### Get/Set settings example:
 ```go
-var OPTION_GET = gopeer.Get("OPTION_GET").(string)
+var AKEY_SIZE = gopeer.Get("AKEY_SIZE").(uint)
 gopeer.Set(gopeer.SettingsType{
-    "NETWORK":  "HIDDEN-LAKE",
-    "VERSION":  "1.0.0s",
-    "HMAC_KEY": "9163571392708145",
+    "AKEY_SIZE": uint(3 << 10),
+    "SKEY_SIZE": uint(1 << 5),
 })
 ```
 
 ### Network functions and methods:
 ```go
-func NewListener(address string) *Listener {}
-func (listener *Listener) NewClient(private *rsa.PrivateKey) *Client {}
-func (listener *Listener) Open(c *Certificate) *Listener {}
-func (listener *Listener) Close() {}
-func (listener *Listener) Run(handleServer func(*Client, *Package)) *Listener {}
-func (listener *Listener) Certificate() []byte {}
-func (listener *Listener) Address() string {}
-func (client *Client) Hashname() string {}
+// CREATE
+func NewNode(address string, client *Client) *Node {}
+func NewClient(priv *rsa.PrivateKey, handle func(*Client, *Package)) *Client {}
+func NewPackage(title, data string) *Package {}
+// ACTIONS
+func Handle(title string, client *Client, pack *Package, handle func(*Client, *Package) string) {}
+func (listener *Node) Run() error {}
+func (client *Client) Send(receiver *rsa.PublicKey, pack *Package, route []*rsa.PublicKey, pseudoSender *Client) (string, error) {}
+func (client *Client) Connect(address string) error {}
+func (client *Client) Disconnect(address string) {}
+func (client *Client) Encrypt(receiver *rsa.PublicKey, pack *Package) *Package {}
+func (client *Client) Decrypt(pack *Package) *Package {}
+// KEYS
 func (client *Client) Public() *rsa.PublicKey {}
 func (client *Client) Private() *rsa.PrivateKey {}
-func (client *Client) Address() string {}
-func (client *Client) Destination(hash string) *Destination {}
-func (client *Client) InConnections(hash string) bool {}
-func (client *Client) HandleAction(title string, pack *Package, handleGet func(*Client, *Package) string, handleSet func(*Client, *Package)) bool {}
-func (client *Client) LoadFile(dest *Destination, input string, output string) error {}
-func (client *Client) Connect(dest *Destination) error {}
-func (client *Client) Disconnect(dest *Destination) error {}
-func (client *Client) SendTo(dest *Destination, pack *Package) (*Package, error) {}
-func (connect *Connect) Hashname() string {}
-func (connect *Connect) Public() *rsa.PublicKey {}
-func (connect *Connect) Address() string {}
-func (connect *Connect) Session() []byte {}
-func (connect *Connect) Certificate() []byte {}
+func (client *Client) StringPublic() string {}
+func (client *Client) StringPrivate() string {}
+func (client *Client) HashPublic() string {}
+// F2F
+func (client *Client) F2F() bool {}
+func (client *Client) EnableF2F() {}
+func (client *Client) DisableF2F() {}
+func (client *Client) InF2F(pub *rsa.PublicKey) bool {}
+func (client *Client) ListF2F() []rsa.PublicKey {}
+func (client *Client) AppendF2F(pub *rsa.PublicKey) {}
+func (client *Client) RemoveF2F(pub *rsa.PublicKey) {}
 ```
 
 ### Cryptography functions:
 ```go
-func FileEncryptAES(key []byte, input string, output string) error {}
-func FileDecryptAES(key []byte, input string, output string) error {}
-func GenerateCertificate(name string, bits int) (string, string) {}
-func GeneratePrivate(bits int) *rsa.PrivateKey {}
-func ParsePrivate(privData string) *rsa.PrivateKey {}
-func ParsePublic(pubData string) *rsa.PublicKey {}
-func ParseCertificate(certData string) *x509.Certificate {}
-func Sign(priv *rsa.PrivateKey, data []byte) []byte {}
-func Verify(pub *rsa.PublicKey, data, sign []byte) error {}
+func GenerateBytes(max uint) []byte {}
+func GeneratePrivate(bits uint) *rsa.PrivateKey {}
 func HashPublic(pub *rsa.PublicKey) string {}
 func HashSum(data []byte) []byte {}
-func HMAC(fHash func([]byte) []byte, data []byte, key []byte) []byte {}
-func GenerateRandomIntegers(max int) []uint64 {}
-func GenerateRandomBytes(max int) []byte {}
+func ParsePrivate(privData string) *rsa.PrivateKey {}
+func ParsePublic(pubData string) *rsa.PublicKey {}
+func StringPrivate(priv *rsa.PrivateKey) string {}
+func StringPublic(pub *rsa.PublicKey) string {}
 func EncryptRSA(pub *rsa.PublicKey, data []byte) []byte {}
 func DecryptRSA(priv *rsa.PrivateKey, data []byte) []byte {}
+func Sign(priv *rsa.PrivateKey, data []byte) []byte {}
+func Verify(pub *rsa.PublicKey, data, sign []byte) error {}
 func EncryptAES(key, data []byte) []byte {}
 func DecryptAES(key, data []byte) []byte {}
-func StringPublic(pub *rsa.PublicKey) string {}
-func StringPrivate(priv *rsa.PrivateKey) string {}
-func ProofOfWork(blockHash []byte, difficulty uint8) uint64 {}
-func NonceIsValid(blockHash []byte, difficulty uint, nonce uint64) bool {}
+func ProofOfWork(packHash []byte, diff uint) uint64 {}
+func ProofIsValid(packHash []byte, diff uint, nonce uint64) bool {}
 ```
 
 ### Additional functions:
 ```go
+func SerializePackage(pack *Package) string {}
+func DeserializePackage(jsonData string) *Package {}
 func Base64Encode(data []byte) string {}
 func Base64Decode(data string) []byte {}
-func PackJSON(data interface{}) []byte {}
-func UnpackJSON(jsonData []byte, data interface{}) interface{} {}
-func ToBytes(num uint64) []byte {}
 ```
 
 ### Package structure:
 ```go
 {
-    Info: {
-        Network: string,
-        Version: string,
-    },
-    From: {
-        Sender: {
-            Hashname: string,
-        },
-        Hashname: string,
-        Address:  string,
-    },
-    To: {
-        Receiver: {
-            Hashname: string,
-        },
-        Hashname: string,
-        Address:  string,
-    },
     Head: {
-        Title:  string,
-        Option: string,
+        Rand:    string,
+        Title:   string,
+        Sender:  string,
+        Session: string,
     },
     Body: {
         Data: string,
-        Desc: {
-            Id:          uint64,
-            Rand:        string,
-            Hash:        string,
-            Sign:        string,
-            Nonce:       uint64,
-            Difficulty:  uint8,
-            Redirection: uint8,
-        },
-        Test: {
-            Hash: string,
-            Sign: string,
-        },
+        Hash: string,
+        Sign: string,
+        Npow: uint64,
     },
 }
 ```
@@ -241,81 +168,24 @@ func ToBytes(num uint64) []byte {}
 ### Listener structure:
 ```go
 {
-    listen: net.Listen,
-    handleFunc: func(*Client, *Package),
-    address: {
-        ipv4: string,
-        port: string,
-    },
-    certificate: []byte,
-    Clients: map[string]{
-        listener: *Listener,
-        remember: {
-            index:   uint16,
-            mapping: map[string]uint16,
-            listing: []string,
-        },
-        keys: {
-            private: *rsa.PrivateKey,
-            public:  *rsa.PublicKey,
-        },
-        hashname: string,
-        address:  string,
-        certPool: *x509.CertPool,
-        F2F: {
-            Perm:    bool,
-            Friends: map[string]bool,
-        },
-        Sharing: {
-            Perm: bool,
-            Path: string,
-        },
-        Mutex:    *sync.Mutex,
-        Connections: map[string]{
-            connected:   bool,
-            hashname:    string,
-            packageId:   uint64,
-            transfer: {
-                active:     bool,
-                inputFile:  string
-                outputFile: string,
-            },
-            address:     string,
-            session:     []byte,
-            relation:    net.Conn,
-            certificate: []byte,
-            throwClient: *rsa.PublicKey,
-            public:      *rsa.PublicKey,
-            Chans: {
-                Action:  chan bool,
-                action:  chan bool,
-            },
-        },
-    },
+    address: string,
+    client:  *Client,
+    listen:  net.Listener,
 }
 ```
 
-### Destination structure:
+### Client structure:
 ```go
 {
-    Address:     string,
-    Certificate: []byte,
-    Public:      *rsa.Public,
-    Receiver:    *rsa.Public,
-}
-```
-
-### File Transfer structure:
-```go
-{
-    Head: {
-        Id:     uint64,
-        Name:   string,
-        IsNull: bool,
-    },
-    Body: {
-        Hash: []byte,
-        Data: []byte,
+    handle:      func(*Client, *Package)
+    mutex:       *sync.Mutex,
+    privateKey:  *rsa.PrivateKey,
+    mapping:     map[string]bool,
+    connections: map[net.Conn]string,
+    actions:     map[string]chan bool,
+    f2f:         {
+        enabled: bool,
+        friends: map[string]*rsa.PublicKey,
     },
 }
 ```
